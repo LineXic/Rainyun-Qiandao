@@ -4,25 +4,11 @@ on:
   schedule:
     - cron: '0 4 * * *'  # UTC+8 12点执行
     - cron: '0 0 1 * *'  # 每月1日0点执行保活机制
-  workflow_dispatch:
-    # 允许手动触发，并支持传递重试参数
-    inputs:
-      is_retry:
-        description: '是否为重试执行'
-        required: true
-        default: 'true'
-        type: boolean
-      retry_count:
-        description: '重试次数'
-        required: true
-        default: '2'
-        type: number
+  workflow_dispatch:  # 允许手动触发
 
 jobs:
   sign-in:
     runs-on: ubuntu-latest
-    # 添加重试策略，最多3次重试（根据需要调整）
-    # 但我们会使用自定义重试逻辑以满足时间限制要求
     steps:
       - uses: actions/checkout@v3
       
@@ -58,7 +44,6 @@ jobs:
         run: mkdir -p temp
       
       - name: 执行签到脚本
-        id: sign_in
         run: python rainyun.py
         env:
           # 请在GitHub仓库的Settings > Secrets and variables > Actions中设置这些密钥
@@ -75,75 +60,6 @@ jobs:
         run: rm -rf temp
         if: always()  # 即使前面步骤失败也执行清理
       
-      # 失败重试机制
-      - name: 检查执行状态并安排重试
-        if: failure() && github.event_name != 'schedule' || (failure() && github.event_name == 'schedule' && github.event.schedule != '0 0 1 * *')
-        uses: actions/github-script@v6
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            // 获取重试相关参数
-            const isRetry = ${{ github.event.inputs.is_retry || 'false' }};
-            let retryCount = parseInt(${{ github.event.inputs.retry_count || '0' }});
-            
-            // 获取当前时间并转换为UTC+8时区
-            const now = new Date();
-            // 转换为UTC+8时区
-            const utc8Time = new Date(now.getTime() + 8 * 60 * 60 * 1000);
-            const currentHour = utc8Time.getHours();
-            
-            console.log(`当前UTC+8时间: ${utc8Time.toISOString()}`);
-            console.log(`当前UTC+8小时: ${currentHour}`);
-            console.log(`是否重试: ${isRetry}, 当前重试次数: ${retryCount}`);
-            
-            // 检查是否在UTC+8晚上10点前
-            if (currentHour < 22) {
-              // 计划1小时后重试
-              retryCount++;
-              console.log(`安排1小时后进行第${retryCount}次重试`);
-              
-              // 使用GitHub API触发工作流重试
-              try {
-                await github.rest.actions.createWorkflowDispatch({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  workflow_id: 'rainyun-sign.yml',
-                  ref: context.ref,
-                  inputs: {
-                    is_retry: 'true',
-                    retry_count: retryCount.toString()
-                  }
-                });
-                
-                console.log(`重试已安排，将在1小时后执行第${retryCount}次尝试`);
-              } catch (error) {
-                console.error('安排重试失败:', error.message);
-                console.log('将在1小时后重试...');
-                
-                // 如果API调用失败，等待1小时后再次执行
-                await new Promise(resolve => setTimeout(resolve, 60 * 60 * 1000));
-                
-                try {
-                  await github.rest.actions.createWorkflowDispatch({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    workflow_id: 'rainyun-sign.yml',
-                    ref: context.ref,
-                    inputs: {
-                      is_retry: 'true',
-                      retry_count: retryCount.toString()
-                    }
-                  });
-                  console.log(`等待后重试已安排`);
-                } catch (retryError) {
-                  console.error('等待后重试也失败:', retryError.message);
-                }
-              }
-            } else {
-              console.log('当前时间已过UTC+8晚上10点，停止重试');
-              console.error('工作流执行失败，且已超过重试时间限制');
-            }
-
       # 保活机制 - 防止GitHub Actions工作流因30天不活跃而被禁用
       - name: Keepalive Workflow
         if: github.event.schedule == '0 0 1 * *'
@@ -153,6 +69,7 @@ jobs:
           script: |
             // 自动更新工作流文件以保持活跃状态
             try {
+              // 获取当前工作流信息
               const workflow = await github.rest.actions.getWorkflow({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
