@@ -58,6 +58,16 @@ def init_selenium(debug=False, headless=False):
     ops.add_argument('--no-proxy-server')
     ops.add_argument('--lang=zh-CN')
     
+    # 添加网络稳定性选项
+    ops.add_argument('--disable-features=IsolateOrigins,site-per-process')
+    ops.add_argument('--disable-software-rasterizer')
+    ops.add_argument('--disable-extensions')
+    ops.add_argument('--dns-prefetch-disable')
+    ops.add_argument('--remote-debugging-port=9222')
+    
+    # 设置页面加载策略
+    ops.page_load_strategy = 'eager'
+    
     # 环境变量判断是否在GitHub Actions中运行
     is_github_actions = os.environ.get("GITHUB_ACTIONS", "false") == "true"
     
@@ -348,6 +358,30 @@ def preprocess_image(image):
     
     return morph
 
+def safe_get_url(driver, url, max_retries=3):
+    """安全地获取URL，添加重试机制"""
+    retries = 0
+    last_error = None
+    
+    while retries < max_retries:
+        try:
+            logger.info(f"正在访问URL: {url} (尝试 {retries + 1}/{max_retries})")
+            # 添加页面加载超时
+            driver.set_page_load_timeout(30)
+            driver.set_script_timeout(30)
+            driver.get(url)
+            logger.info(f"成功访问URL: {url}")
+            return True
+        except Exception as e:
+            retries += 1
+            last_error = e
+            wait_time = 5 * retries  # 指数退避
+            logger.error(f"访问URL失败: {e}. {wait_time}秒后重试 ({retries}/{max_retries})")
+            time.sleep(wait_time)
+    
+    logger.error(f"所有重试都失败了: {last_error}")
+    return False
+
 def compute_similarity(img1_path, img2_path):
     """优化的相似度计算函数"""
     # 读取图像
@@ -463,7 +497,14 @@ if __name__ == "__main__":
         "source": js
     })
     logger.info("发起登录请求")
-    driver.get("https://app.rainyun.com/auth/login")
+    # 使用安全的URL访问函数
+    if not safe_get_url(driver, "https://app.rainyun.com/auth/login"):
+        logger.error("无法访问登录页面，尝试备用URL...")
+        # 尝试备用URL
+        if not safe_get_url(driver, "https://www.rainyun.com/auth/login"):
+            logger.error("所有URL都无法访问，退出程序")
+            driver.quit()
+            exit(1)
     wait = WebDriverWait(driver, timeout)
     # 改进的登录逻辑，添加重试机制
     max_retries = 3
