@@ -3,14 +3,10 @@ import os
 import random
 import re
 import time
-from urllib3.exceptions import InsecureRequestWarning
-import requests
-
-# 禁用不安全请求警告
-requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
 
 import cv2
 import ddddocr
+import requests
 from selenium import webdriver
 from selenium.common import TimeoutException
 from selenium.webdriver import ActionChains
@@ -61,16 +57,6 @@ def init_selenium(debug=False, headless=False):
     ops.add_argument('--disable-blink-features=AutomationControlled')
     ops.add_argument('--no-proxy-server')
     ops.add_argument('--lang=zh-CN')
-    
-    # 添加网络稳定性选项
-    ops.add_argument('--disable-features=IsolateOrigins,site-per-process')
-    ops.add_argument('--disable-software-rasterizer')
-    ops.add_argument('--disable-extensions')
-    ops.add_argument('--dns-prefetch-disable')
-    ops.add_argument('--remote-debugging-port=9222')
-    
-    # 设置页面加载策略
-    ops.page_load_strategy = 'eager'
     
     # 环境变量判断是否在GitHub Actions中运行
     is_github_actions = os.environ.get("GITHUB_ACTIONS", "false") == "true"
@@ -362,129 +348,6 @@ def preprocess_image(image):
     
     return morph
 
-def safe_get_url(driver, url, max_retries=3):
-    """安全地获取URL，添加重试机制"""
-    retries = 0
-    last_error = None
-    
-    while retries < max_retries:
-        try:
-            logger.info(f"正在访问URL: {url} (尝试 {retries + 1}/{max_retries})")
-            # 添加页面加载超时
-            driver.set_page_load_timeout(30)
-            driver.set_script_timeout(30)
-            driver.get(url)
-            logger.info(f"成功访问URL: {url}")
-            return True
-        except Exception as e:
-            retries += 1
-            last_error = e
-            wait_time = 5 * retries  # 指数退避
-            logger.error(f"访问URL失败: {e}. {wait_time}秒后重试 ({retries}/{max_retries})")
-            time.sleep(wait_time)
-    
-    logger.error(f"所有重试都失败了: {last_error}")
-    return False
-
-def api_login(username, password):
-    """使用requests直接调用API登录，作为Selenium的备选方案"""
-    logger.info("切换到API登录备选方案")
-    session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Content-Type': 'application/json',
-        'Accept': 'application/json, text/plain, */*',
-        'Origin': 'https://app.rainyun.com',
-        'Referer': 'https://app.rainyun.com/auth/login'
-    })
-    
-    # 尝试不同的API端点
-    api_endpoints = [
-        "https://app.rainyun.com/api/v4/user/login",
-        "https://api.rainyun.com/v4/user/login",
-        "https://www.rainyun.com/api/v4/user/login"
-    ]
-    
-    for endpoint in api_endpoints:
-        logger.info(f"尝试API登录端点: {endpoint}")
-        try:
-            # 获取Cookie或预处理（有些API需要先访问网页获取Cookie）
-            session.get("https://app.rainyun.com/auth/login", timeout=10, verify=False)
-            
-            # 构建登录数据
-            login_data = {
-                "email": username,
-                "password": password
-            }
-            
-            # 发送登录请求
-            response = session.post(endpoint, json=login_data, timeout=15, verify=False)
-            logger.info(f"API登录响应状态码: {response.status_code}")
-            
-            # 检查响应
-            if response.status_code == 200:
-                try:
-                    data = response.json()
-                    logger.info(f"API登录响应: {data}")
-                    
-                    # 检查是否登录成功（根据实际API响应调整）
-                    if data.get("code") == 0 or "access_token" in data or "token" in data:
-                        logger.info("API登录成功!")
-                        return session, data
-                    else:
-                        logger.warning(f"API登录返回非成功状态: {data}")
-                except Exception as e:
-                    logger.error(f"解析API响应失败: {e}")
-                    logger.info(f"响应内容: {response.text[:200]}...")
-            else:
-                logger.warning(f"API登录请求失败，状态码: {response.status_code}")
-                logger.info(f"响应内容: {response.text[:200]}...")
-                
-        except Exception as e:
-            logger.error(f"API登录请求异常: {e}")
-    
-    logger.error("所有API登录端点都失败了")
-    return None, None
-
-def api_checkin(session):
-    """使用已登录的会话进行签到"""
-    logger.info("尝试使用API进行签到")
-    
-    # 尝试不同的签到API端点
-    checkin_endpoints = [
-        "https://app.rainyun.com/api/v4/user/checkin",
-        "https://api.rainyun.com/v4/user/checkin",
-        "https://www.rainyun.com/api/v4/user/checkin"
-    ]
-    
-    for endpoint in checkin_endpoints:
-        logger.info(f"尝试签到端点: {endpoint}")
-        try:
-            response = session.post(endpoint, timeout=15, verify=False)
-            logger.info(f"签到响应状态码: {response.status_code}")
-            
-            if response.status_code == 200:
-                try:
-                    data = response.json()
-                    logger.info(f"签到响应: {data}")
-                    
-                    # 根据实际API响应调整成功判断条件
-                    if data.get("code") == 0 or "success" in str(data).lower() or "签到" in str(data):
-                        logger.info("API签到成功!")
-                        return True, data
-                    else:
-                        logger.warning(f"签到返回非成功状态: {data}")
-                except Exception as e:
-                    logger.error(f"解析签到响应失败: {e}")
-            else:
-                logger.warning(f"签到请求失败，状态码: {response.status_code}")
-                
-        except Exception as e:
-            logger.error(f"签到请求异常: {e}")
-    
-    logger.error("所有签到API端点都失败了")
-    return False, None
-
 def compute_similarity(img1_path, img2_path):
     """优化的相似度计算函数"""
     # 读取图像
@@ -600,50 +463,7 @@ if __name__ == "__main__":
         "source": js
     })
     logger.info("发起登录请求")
-    # 初始化API优先模式标志
-    api_first = os.environ.get('RAINYUN_API_FIRST', 'false').lower() == 'true'
-    
-    # 如果启用了API优先模式，直接尝试API登录
-    if api_first:
-        logger.info("启用了API优先模式，首先尝试API登录...")
-        session, login_data = api_login(user, pwd)
-        if session and login_data:
-            # 尝试API签到
-            success, checkin_data = api_checkin(session)
-            if success:
-                logger.info("使用API优先模式完成签到！")
-                logger.info(f"签到结果: {checkin_data}")
-                driver.quit()
-                exit(0)
-            else:
-                logger.warning("API签到失败，切换到Selenium模式...")
-        else:
-            logger.warning("API登录失败，切换到Selenium模式...")
-    
-    # 使用安全的URL访问函数
-    if not safe_get_url(driver, "https://app.rainyun.com/auth/login"):
-        logger.error("无法访问登录页面，尝试备用URL...")
-        # 尝试备用URL
-        if not safe_get_url(driver, "https://www.rainyun.com/auth/login"):
-            logger.error("所有URL都无法访问，尝试API登录备选方案...")
-            # 关闭Selenium浏览器
-            driver.quit()
-            
-            # 尝试使用API登录
-            session, login_data = api_login(user, pwd)
-            if session and login_data:
-                # 尝试API签到
-                success, checkin_data = api_checkin(session)
-                if success:
-                    logger.info("使用API备选方案完成签到！")
-                    logger.info(f"签到结果: {checkin_data}")
-                    exit(0)
-                else:
-                    logger.error("API签到失败，但登录成功，可能需要更新签到API")
-                    exit(1)
-            else:
-                logger.error("API登录备选方案也失败了，退出程序")
-                exit(1)
+    driver.get("https://app.rainyun.com/auth/login")
     wait = WebDriverWait(driver, timeout)
     # 改进的登录逻辑，添加重试机制
     max_retries = 3
