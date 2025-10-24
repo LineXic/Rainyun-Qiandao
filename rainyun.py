@@ -3,6 +3,8 @@ import os
 import random
 import re
 import time
+import subprocess
+import sys
 
 import cv2
 import ddddocr
@@ -57,6 +59,15 @@ def init_selenium(debug=False, headless=False):
     ops.add_argument('--disable-blink-features=AutomationControlled')
     ops.add_argument('--no-proxy-server')
     ops.add_argument('--lang=zh-CN')
+    
+    # 添加网络稳定性选项
+    ops.add_argument('--disable-features=IsolateOrigins,site-per-process')
+    ops.add_argument('--disable-software-rasterizer')
+    ops.add_argument('--dns-prefetch-disable')
+    ops.add_argument('--remote-debugging-port=9222')
+    
+    # 设置页面加载策略
+    ops.page_load_strategy = 'eager'  # 使用eager策略加快加载速度
     
     # 环境变量判断是否在GitHub Actions中运行
     is_github_actions = os.environ.get("GITHUB_ACTIONS", "false") == "true"
@@ -161,6 +172,42 @@ def get_width_from_style(style):
 
 def get_height_from_style(style):
     return re.search(r'height:\s*([\d.]+)px', style).group(1)
+
+
+def safe_get_url(driver, url, max_retries=3):
+    """安全地获取URL，添加重试机制"""
+    retries = 0
+    last_error = None
+    
+    while retries < max_retries:
+        try:
+            logger.info(f"尝试访问URL: {url} (尝试 {retries + 1}/{max_retries})")
+            driver.get(url)
+            # 验证页面是否成功加载
+            # 等待一小段时间让页面开始加载
+            time.sleep(2)
+            # 检查当前URL是否包含目标域名，基本验证页面加载
+            if 'rainyun.com' in driver.current_url or driver.page_source:
+                logger.info("URL访问成功")
+                return True
+            else:
+                raise Exception("页面加载失败，无法检测到有效内容")
+        except Exception as e:
+            retries += 1
+            last_error = str(e)
+            logger.warning(f"URL访问失败: {e}")
+            if retries < max_retries:
+                wait_time = retries * 2  # 指数退避
+                logger.info(f"{wait_time}秒后重试...")
+                time.sleep(wait_time)
+                # 刷新浏览器以重置状态
+                try:
+                    driver.refresh()
+                except:
+                    pass
+    
+    logger.error(f"所有尝试都失败，最后错误: {last_error}")
+    return False
 
 
 def process_captcha():
@@ -463,7 +510,16 @@ if __name__ == "__main__":
         "source": js
     })
     logger.info("发起登录请求")
-    driver.get("https://app.rainyun.com/auth/login")
+    # 使用安全的URL访问函数
+    login_url = "https://app.rainyun.com/auth/login"
+    if not safe_get_url(driver, login_url):
+        # 尝试备用URL
+        logger.info("尝试备用登录URL")
+        backup_url = "https://www.rainyun.com/auth/login"
+        if not safe_get_url(driver, backup_url):
+            logger.error("所有登录URL都无法访问，可能是网络问题或网站维护")
+            driver.quit()
+            exit(1)
     wait = WebDriverWait(driver, timeout)
     # 改进的登录逻辑，添加重试机制
     max_retries = 3
