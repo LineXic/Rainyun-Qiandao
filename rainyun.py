@@ -65,39 +65,26 @@ def init_selenium(debug=False, headless=False):
     ops.add_argument('--allow-insecure-localhost')
     ops.add_argument('--log-level=3')
     
-    # 获取国内代理IP
-    proxy_url = None
+    # 使用固定代理IP配置
     try:
         # 优先从环境变量获取代理设置
         proxy_url = os.environ.get('HTTP_PROXY') or os.environ.get('HTTPS_PROXY')
         
-        # 如果没有环境变量代理设置，且在GitHub Actions环境中，尝试从API获取代理
-        if not proxy_url and os.environ.get("GITHUB_ACTIONS", "false") == "true":
-            logger.info("尝试从API获取国内代理IP")
-            response = requests.get("https://proxy.scdn.io/api/get_proxy.php?protocol=https", timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                if data.get('code') == 200 and data.get('data', {}).get('proxies'):
-                    proxy_ip = data['data']['proxies'][0]
-                    proxy_url = f"https://{proxy_ip}"
-                    logger.info(f"成功获取代理IP: {proxy_ip}")
-                else:
-                    logger.warning(f"代理API返回异常: {data}")
-            else:
-                logger.warning(f"代理API请求失败: {response.status_code}")
+        # 如果没有环境变量代理设置，使用固定代理IP
+        if not proxy_url:
+            # 使用固定代理IP 115.239.234.43:7302，使用http协议
+            proxy_url = "http://115.239.234.43:7302"
+            logger.info("使用固定代理IP: 115.239.234.43:7302 (HTTP协议)")
+        else:
+            logger.info(f"使用环境变量配置的代理: {proxy_url}")
         
         # 配置代理
-        if proxy_url:
-            logger.info(f"使用代理: {proxy_url}")
-            # 添加代理选项
-            ops.add_argument(f'--proxy-server={proxy_url}')
-            # 信任所有SSL证书，避免代理SSL问题
-            ops.add_argument('--ignore-certificate-errors-spki-list=*')
-        else:
-            logger.info("未配置代理，使用直接连接")
-            ops.add_argument('--no-proxy-server')
+        ops.add_argument(f'--proxy-server={proxy_url}')
+        # 信任所有SSL证书，避免代理SSL问题
+        ops.add_argument('--ignore-certificate-errors-spki-list=*')
     except Exception as e:
         logger.error(f"代理配置出错: {e}")
+        logger.warning("将使用直接连接模式")
         ops.add_argument('--no-proxy-server')
     
     # 添加网络超时设置
