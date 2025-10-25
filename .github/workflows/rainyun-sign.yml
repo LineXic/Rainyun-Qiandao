@@ -3,7 +3,6 @@ name: Rainyun 自动签到
 on:
   schedule:
     - cron: '0 4 * * *'  # UTC+8 12点执行
-    - cron: '0 0 1 * *'  # 每月1日0点执行保活机制
   workflow_dispatch:  # 允许手动触发
 
 jobs:
@@ -55,40 +54,7 @@ jobs:
           DEBUG: "false"
           # 确保使用系统路径中的ChromeDriver
           CHROMEDRIVER_PATH: "chromedriver"
-          # 设置固定代理IP（HTTP协议）
-          # 脚本中也已配置相同的固定代理，作为双重保障
-          HTTP_PROXY: "http://115.239.234.43:7302"
-          HTTPS_PROXY: "http://115.239.234.43:7302"
       
       - name: 清理临时文件
         run: rm -rf temp
         if: always()  # 即使前面步骤失败也执行清理
-      
-      # 保活机制 - 防止GitHub Actions工作流因30天不活跃而被禁用
-      - name: Keepalive Workflow
-        if: github.event.schedule == '0 0 1 * *'
-        uses: actions/github-script@v6
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            // 自动更新工作流文件以保持活跃状态
-            try {
-              // 获取当前工作流信息
-              const workflow = await github.rest.actions.getWorkflow({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                workflow_id: 'rainyun-sign.yml'
-              });
-              
-              // 触发工作流自己运行一次作为保活
-              await github.rest.actions.createWorkflowDispatch({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                workflow_id: 'rainyun-sign.yml',
-                ref: context.ref
-              });
-              
-              console.log('工作流保活成功！');
-            } catch (error) {
-              console.error('工作流保活失败:', error.message);
-            }
