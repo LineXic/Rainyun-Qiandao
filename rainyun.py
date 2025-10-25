@@ -3,27 +3,36 @@ import os
 import random
 import re
 import time
+import subprocess
+import sys
+
+# 配置日志记录器
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# 设置环境变量以避免外部服务调用
+os.environ['WDM_AUTO_UPDATE'] = '0'
+os.environ['WDM_SSL_VERIFY'] = '0'
+os.environ['WDM_LOG_LEVEL'] = '0'
+os.environ['WDM_LOCAL'] = '1'
 
 import cv2
 import ddddocr
 import requests
+from selenium.common import TimeoutException, WebDriverException, NoSuchElementException
 from selenium import webdriver
-from selenium.common import TimeoutException
 from selenium.webdriver import ActionChains
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.webdriver import WebDriver
+from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.wait import WebDriverWait
-from webdriver_manager.chrome import ChromeDriverManager
-
-
-# 修改init_selenium函数，修复linux变量作用域问题
-# 在文件开头导入webdriver-manager
-# 修改这两行导入语句
-# from webdriver_manager.chrome import ChromeDriverManager
-# from webdriver_manager.core.utils import ChromeType
 
 # 修改为正确的导入方式
 try:
@@ -41,29 +50,38 @@ except ImportError:
     print("webdriver_manager未安装，将使用备用方式")
     ChromeDriverManager = None
     ChromeType = None
-import subprocess
-import sys
 
 def init_selenium(debug=False, headless=False):
-    ops = webdriver.ChromeOptions()
+    """初始化Selenium WebDriver，优化ChromeDriver的使用策略"""
+    # 初始化日志记录器
+    if not logging.getLogger().handlers:
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s'
+        )
+    
+    logger.info("开始初始化Selenium WebDriver...")
+    chrome_options = Options()
     
     # 无论什么环境都添加无头模式选项
-    if headless or os.environ.get("GITHUB_ACTIONS", "false") == "true":
+    is_github_actions = os.environ.get("GITHUB_ACTIONS", "false") == "true"
+    if headless or is_github_actions:
+        logger.info("启用无头模式")
         for option in ['--headless', '--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu']:
-            ops.add_argument(option)
+            chrome_options.add_argument(option)
     
     # 添加通用选项
-    ops.add_argument('--window-size=1920,1080')
-    ops.add_argument('--disable-blink-features=AutomationControlled')
-    ops.add_argument('--lang=zh-CN')
+    chrome_options.add_argument('--window-size=1920,1080')
+    chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+    chrome_options.add_argument('--lang=zh-CN')
     
     # 增强网络稳定性选项
-    ops.add_argument('--disable-features=site-per-process')
-    ops.add_argument('--disable-extensions')
-    ops.add_argument('--disable-infobars')
-    ops.add_argument('--ignore-certificate-errors')
-    ops.add_argument('--allow-insecure-localhost')
-    ops.add_argument('--log-level=3')
+    chrome_options.add_argument('--disable-features=site-per-process')
+    chrome_options.add_argument('--disable-extensions')
+    chrome_options.add_argument('--disable-infobars')
+    chrome_options.add_argument('--ignore-certificate-errors')
+    chrome_options.add_argument('--allow-insecure-localhost')
+    chrome_options.add_argument('--log-level=3')
     
     # 使用固定代理IP配置
     try:
@@ -79,96 +97,162 @@ def init_selenium(debug=False, headless=False):
             logger.info(f"使用环境变量配置的代理: {proxy_url}")
         
         # 配置代理
-        ops.add_argument(f'--proxy-server={proxy_url}')
+        chrome_options.add_argument(f'--proxy-server={proxy_url}')
         # 信任所有SSL证书，避免代理SSL问题
-        ops.add_argument('--ignore-certificate-errors-spki-list=*')
+        chrome_options.add_argument('--ignore-certificate-errors-spki-list=*')
     except Exception as e:
         logger.error(f"代理配置出错: {e}")
         logger.warning("将使用直接连接模式")
-        ops.add_argument('--no-proxy-server')
+        # 移除可能存在的代理配置
+        if '--proxy-server' in str(chrome_options.arguments):
+            chrome_options.arguments = [arg for arg in chrome_options.arguments if not arg.startswith('--proxy-server')]
     
     # 添加网络超时设置
-    ops.set_capability('timeouts', {'pageLoad': 60000, 'script': 60000, 'implicit': 30000})
+    chrome_options.set_capability('timeouts', {'pageLoad': 60000, 'script': 60000, 'implicit': 30000})
     
     # 禁用不必要的安全策略以提高连接成功率
-    if os.environ.get("GITHUB_ACTIONS", "false") == "true":
-        ops.add_argument('--disable-web-security')
-        ops.add_argument('--allow-running-insecure-content')
-    
-    # 环境变量判断是否在GitHub Actions中运行
-    is_github_actions = os.environ.get("GITHUB_ACTIONS", "false") == "true"
+    if is_github_actions:
+        chrome_options.add_argument('--disable-web-security')
+        chrome_options.add_argument('--allow-running-insecure-content')
     
     if debug and not is_github_actions:
-        ops.add_experimental_option("detach", True)
+        chrome_options.add_experimental_option("detach", True)
     
     # 尝试不同的ChromeDriver使用策略
+    driver = None
+    
+    # 策略0: 优先检查环境变量中指定的ChromeDriver路径
+    try:
+        chromedriver_path = os.environ.get('CHROMEDRIVER_PATH')
+        if chromedriver_path and os.path.exists(chromedriver_path):
+            logger.info(f"尝试使用环境变量指定的ChromeDriver路径: {chromedriver_path}")
+            service = Service(chromedriver_path)
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+            logger.info("成功使用环境变量指定的ChromeDriver")
+            return driver
+    except Exception as e:
+        logger.warning(f"环境变量ChromeDriver失败: {str(e)}")
+    
     # 策略1: 直接使用系统路径中的ChromeDriver（最简单可靠）
     try:
-        print("尝试直接使用系统ChromeDriver...")
+        logger.info("尝试直接使用系统ChromeDriver...")
         # 不指定service，让Selenium自动查找系统路径中的ChromeDriver
-        driver = webdriver.Chrome(options=ops)
-        print("成功使用系统ChromeDriver")
+        driver = webdriver.Chrome(options=chrome_options)
+        logger.info("成功使用系统ChromeDriver")
         return driver
     except Exception as e:
-        print(f"系统ChromeDriver失败: {e}")
+        logger.warning(f"系统ChromeDriver失败: {str(e)}")
     
-    # 策略2: 优化webdriver-manager的使用方式
+    # 策略2: 优化webdriver-manager的使用方式，使用本地模式避免外部依赖
     try:
-        print("尝试使用webdriver-manager...")
+        logger.info("尝试使用webdriver-manager (本地模式)...")
         if ChromeDriverManager:
-            # 仅当ChromeType可用时才指定chrome_type参数
-            if ChromeType and hasattr(ChromeType, 'GOOGLE'):
-                manager = ChromeDriverManager(chrome_type=ChromeType.GOOGLE)
-            else:
-                # 在新版本中，可能不再需要指定ChromeType
-                manager = ChromeDriverManager()
-            
-            # 获取驱动路径但不自动安装
-            driver_path = manager.install()
-            print(f"获取到ChromeDriver路径: {driver_path}")
-            # 手动创建service并指定正确的驱动路径
-            service = Service(driver_path)
-            driver = webdriver.Chrome(service=service, options=ops)
-            print("成功使用webdriver-manager")
-            return driver
-        else:
-            raise ImportError("webdriver_manager未安装")
+            # 设置临时环境变量，确保不调用外部服务
+            with os.environ.copy() as temp_env:
+                temp_env['WDM_LOCAL'] = '1'
+                temp_env['WDM_GITHUB_TOKEN'] = ''
+                
+                # 仅当ChromeType可用时才指定chrome_type参数
+                if ChromeType and hasattr(ChromeType, 'GOOGLE'):
+                    manager = ChromeDriverManager(chrome_type=ChromeType.GOOGLE)
+                else:
+                    # 在新版本中，可能不再需要指定ChromeType
+                    manager = ChromeDriverManager()
+                
+                # 尝试获取驱动路径但不自动安装
+                try:
+                    driver_path = manager.install()
+                    logger.info(f"获取到ChromeDriver路径: {driver_path}")
+                    # 手动创建service并指定正确的驱动路径
+                    service = Service(driver_path)
+                    driver = webdriver.Chrome(service=service, options=chrome_options)
+                    logger.info("成功使用webdriver-manager")
+                    return driver
+                except Exception as install_error:
+                    logger.warning(f"webdriver-manager安装失败: {str(install_error)}")
     except Exception as e:
-        print(f"webdriver-manager失败: {e}")
+        logger.warning(f"webdriver-manager失败: {str(e)}")
     
     # 策略3: 作为最后的备用，尝试使用固定路径
     try:
-        print("尝试使用备用ChromeDriver路径...")
+        logger.info("尝试使用备用ChromeDriver路径...")
         # 尝试常见的ChromeDriver路径
-        common_paths = ['/usr/local/bin/chromedriver', '/usr/bin/chromedriver', './chromedriver', 'chromedriver']
+        common_paths = [
+            '/usr/local/bin/chromedriver', '/usr/bin/chromedriver', 
+            './chromedriver', 'chromedriver', 'chromedriver.exe',
+            '/opt/hostedtoolcache/Python/*/x64/lib/python*/site-packages/chromedriver_binary/chromedriver'  # GitHub Actions可能的路径
+        ]
+        
+        # 展开通配符路径
+        import glob
+        expanded_paths = []
         for path in common_paths:
+            if '*' in path:
+                expanded_paths.extend(glob.glob(path))
+            else:
+                expanded_paths.append(path)
+        
+        for path in expanded_paths:
             try:
-                service = Service(path)
-                driver = webdriver.Chrome(service=service, options=ops)
-                print(f"成功使用备用路径: {path}")
+                if os.path.exists(path):
+                    logger.info(f"尝试备用路径: {path}")
+                    service = Service(path)
+                    # 抑制版本不匹配警告
+                    service.creationflags = 0x08000000  # NoWindow
+                    driver = webdriver.Chrome(service=service, options=chrome_options)
+                    logger.info(f"成功使用备用路径: {path}")
+                    return driver
+            except Exception as path_error:
+                logger.debug(f"路径 {path} 失败: {str(path_error)}")
+                continue
+    except Exception as e:
+        logger.warning(f"备用路径搜索失败: {str(e)}")
+    
+    # 策略4: 在GitHub Actions环境中，尝试安装特定版本的ChromeDriver
+    if is_github_actions:
+        logger.info("在GitHub Actions环境中，尝试安装特定版本的ChromeDriver...")
+        try:
+            # 直接安装特定版本以匹配Chrome 140
+            logger.info("安装chromedriver-binary==140.0.7356.93...")
+            subprocess.run([sys.executable, '-m', 'pip', 'install', 'chromedriver-binary==140.0.7356.93'], 
+                          check=True, timeout=30)
+            import chromedriver_binary  # 这个包会自动设置路径
+            logger.info("导入chromedriver_binary成功")
+            driver = webdriver.Chrome(options=chrome_options)
+            logger.info("成功使用chromedriver-binary特定版本")
+            return driver
+        except Exception as e:
+            logger.error(f"特定版本安装失败: {str(e)}")
+    
+    # 策略5: 最后尝试强制使用系统ChromeDriver，忽略版本匹配警告
+    try:
+        logger.info("最后尝试: 强制使用系统ChromeDriver，忽略版本警告...")
+        # 创建服务时设置静默模式
+        for path in ["chromedriver", "chromedriver.exe", "/usr/bin/chromedriver"]:
+            try:
+                service = Service(path, service_args=['--silent'])
+                driver = webdriver.Chrome(service=service, options=chrome_options)
+                logger.info("成功强制使用ChromeDriver")
                 return driver
             except:
                 continue
     except Exception as e:
-        print(f"备用路径失败: {e}")
+        logger.error(f"强制使用失败: {str(e)}")
     
     # 所有策略都失败时的错误处理
-    print("错误: 无法初始化ChromeDriver，请检查Chrome和ChromeDriver的安装")
-    # 在GitHub Actions环境中，尝试安装ChromeDriver的备用方法
-    if is_github_actions:
-        print("在GitHub Actions环境中，尝试安装ChromeDriver...")
-        try:
-            # 使用npm的chromedriver包作为备用
-            subprocess.run([sys.executable, '-m', 'pip', 'install', 'chromedriver-binary-auto'])
-            import chromedriver_binary  # 这个包会自动设置路径
-            driver = webdriver.Chrome(options=ops)
-            print("成功使用chromedriver-binary-auto")
-            return driver
-        except Exception as e:
-            print(f"备用安装失败: {e}")
+    logger.error("无法初始化ChromeDriver，请检查Chrome和ChromeDriver的安装")
     
-    # 彻底失败
-    raise Exception("无法初始化Selenium WebDriver")
+    # 设置超时
+    if driver:
+        driver.set_page_load_timeout(60)
+        driver.set_script_timeout(30)
+        driver.implicitly_wait(10)
+        logger.info("Selenium初始化成功！")
+    else:
+        logger.error("无法初始化Selenium WebDriver，请确保chromedriver已正确安装")
+        raise Exception("无法初始化Selenium WebDriver")
+    
+    return driver
 
 def download_image(url, filename):
     os.makedirs("temp", exist_ok=True)
@@ -446,14 +530,20 @@ def compute_similarity(img1_path, img2_path):
         return 0.0, 0
 
 
-# 修改main函数，移除重复的变量定义
-# 修改随机延时等待设置
-if __name__ == "__main__":
+# 实现main函数，添加重试机制并优化错误处理
+def main(debug=False):
+    """主函数，执行雨云自动签到流程"""
+    # 记录开始时间
+    start_time = time.time()
+    
     # 连接超时等待
     timeout = 15
 
-    user = os.environ.get("RAINYUN_USER")
-    pwd = os.environ.get("RAINYUN_PASS")
+    # 定义环境变量
+    user = os.environ.get("RAINYUN_USER", "")
+    pwd = os.environ.get("RAINYUN_PASS", "")
+    user = user.strip()
+    pwd = pwd.strip()
     
     # 确保有用户名和密码
     if not user or not pwd:
@@ -463,14 +553,231 @@ if __name__ == "__main__":
     # 环境变量判断是否在GitHub Actions中运行
     is_github_actions = os.environ.get("GITHUB_ACTIONS", "false") == "true"
     # 从环境变量读取模式设置
-    debug = os.environ.get('DEBUG', 'false').lower() == 'true'
+    if not debug:  # 只有传入的debug为False时才从环境变量读取
+        debug = os.environ.get('DEBUG', 'false').lower() == 'true'
     headless = os.environ.get('HEADLESS', 'false').lower() == 'true'
     
     # 如果在GitHub Actions环境中，强制使用无头模式
     if is_github_actions:
         headless = True
     
-    # 以下代码保持不变...
+    # 随机延时等待，避免被检测为脚本
+    if not debug:
+        random_sleep = random.randint(1, 10)
+        logger.info(f"随机延时等待 {random_sleep} 秒")
+        time.sleep(random_sleep)
+    
+    # 初始化 ddddocr，添加错误处理
+    logger.info("初始化 ddddocr")
+    try:
+        ocr = ddddocr.DdddOcr(ocr=True, show_ad=False)
+        det = ddddocr.DdddOcr(det=True, show_ad=False)
+    except Exception as e:
+        logger.error(f"初始化ddddocr失败: {e}")
+        logger.warning("将尝试继续执行，但可能无法处理验证码")
+        ocr = None
+        det = None
+    
+    # 初始化 Selenium，添加重试机制
+    logger.info("初始化 Selenium")
+    max_retries = 3
+    retry_count = 0
+    driver = None
+    
+    while retry_count < max_retries:
+        try:
+            driver = init_selenium(debug=debug, headless=headless)
+            break  # 成功初始化，跳出循环
+        except Exception as e:
+            retry_count += 1
+            logger.error(f"初始化Selenium失败 (尝试 {retry_count}/{max_retries}): {str(e)}")
+            
+            if retry_count < max_retries:
+                # 指数退避策略
+                wait_time = 2 ** retry_count + random.uniform(0, 1)
+                logger.info(f"{wait_time:.2f}秒后重试...")
+                time.sleep(wait_time)
+            else:
+                logger.critical("达到最大重试次数，无法初始化Selenium")
+                raise Exception(f"无法初始化Selenium WebDriver，错误: {str(e)}")
+    
+    try:
+        # 继续执行原有的功能
+        # 过 Selenium 检测
+        with open("stealth.min.js", mode="r") as f:
+            js = f.read()
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+            "source": js
+        })
+        logger.info("发起登录请求")
+        # 添加连接重试机制
+        max_connection_retries = 3
+        connection_retry_count = 0
+        
+        while connection_retry_count < max_connection_retries:
+            try:
+                logger.info(f"尝试连接雨云登录页面 (第{connection_retry_count + 1}/{max_connection_retries}次)")
+                # 设置页面加载超时
+                driver.set_page_load_timeout(30)
+                driver.get("https://app.rainyun.com/auth/login")
+                # 简单检查页面是否加载成功
+                current_url = driver.current_url
+                logger.info(f"连接成功，当前URL: {current_url}")
+                break
+            except Exception as e:
+                connection_retry_count += 1
+                logger.error(f"连接失败: {str(e)}")
+                if connection_retry_count < max_connection_retries:
+                    wait_time = (connection_retry_count * 2) + random.randint(1, 3)
+                    logger.info(f"{wait_time}秒后重试...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error("达到最大重试次数，连接失败！")
+                    raise
+        
+        wait = WebDriverWait(driver, timeout)
+        # 改进的登录逻辑，添加重试机制
+        max_retries = 3
+        retry_count = 0
+        login_success = False
+        
+        while retry_count < max_retries and not login_success:
+            try:
+                # 使用更可靠的定位方式
+                username = wait.until(EC.visibility_of_element_located((By.NAME, 'login-field')))
+                password = wait.until(EC.visibility_of_element_located((By.NAME, 'login-password')))
+                
+                # 尝试多种方式定位登录按钮
+                try:
+                    login_button = wait.until(EC.element_to_be_clickable((By.XPATH,
+                                                                        '//*[@id="app"]/div[1]/div[1]/div/div[2]/fade/div/div/span/form/button')))
+                except:
+                    try:
+                        login_button = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'button[type="submit"]')))
+                    except:
+                        login_button = wait.until(EC.element_to_be_clickable((By.XPATH, '//button[contains(text(), "登录")]')))
+                
+                # 清除可能存在的输入
+                username.clear()
+                password.clear()
+                
+                # 添加输入延迟，模拟真实用户
+                username.send_keys(user)
+                time.sleep(0.5)
+                password.send_keys(pwd)
+                time.sleep(0.5)
+                
+                # 使用JavaScript点击，避免元素遮挡问题
+                driver.execute_script("arguments[0].click();", login_button)
+                logger.info(f"登录尝试 {retry_count + 1}/{max_retries}")
+                login_success = True
+            except TimeoutException:
+                retry_count += 1
+                if retry_count < max_retries:
+                    logger.warning(f"登录失败，{retry_count}秒后重试...")
+                    time.sleep(retry_count)
+                    driver.refresh()
+                else:
+                    logger.error("页面加载超时，请尝试延长超时时间或切换到国内网络环境！")
+                    exit()
+        try:
+            login_captcha = wait.until(EC.visibility_of_element_located((By.ID, 'tcaptcha_iframe_dy')))
+            logger.warning("触发验证码！")
+            driver.switch_to.frame("tcaptcha_iframe_dy")
+            process_captcha()
+        except TimeoutException:
+            logger.info("未触发验证码")
+        time.sleep(5)
+        driver.switch_to.default_content()
+        # 验证登录状态并处理赚取积分
+        if "dashboard" in driver.current_url:
+            logger.info("登录成功！")
+            logger.info("正在转到赚取积分页")
+            
+            # 尝试多次访问赚取积分页面
+            for _ in range(3):
+                try:
+                    driver.get("https://app.rainyun.com/account/reward/earn")
+                    logger.info("等待赚取积分页面加载...")
+                    # 等待页面加载完成
+                    wait.until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
+                    time.sleep(3)  # 额外等待确保页面完全渲染
+                    
+                    # 使用多种策略查找赚取积分按钮
+                    earn = None
+                    strategies = [
+                        (By.XPATH, '//*[@id="app"]/div[1]/div[3]/div[2]/div/div/div[2]/div[2]/div/div/div/div[1]/div/div[1]/div/div[1]/div/span[2]/a'),
+                        (By.XPATH, '//a[contains(@href, "earn") and contains(text(), "赚取")]'),
+                        (By.CSS_SELECTOR, 'a[href*="earn"]'),
+                        (By.XPATH, '//a[contains(@class, "earn")]')
+                    ]
+                    
+                    for by, selector in strategies:
+                        try:
+                            earn = wait.until(EC.element_to_be_clickable((by, selector)))
+                            logger.info(f"使用策略 {by}={selector} 找到赚取积分按钮")
+                            break
+                        except:
+                            logger.debug(f"策略 {by}={selector} 未找到按钮，尝试下一种")
+                            continue
+                    
+                    if earn:
+                        # 滚动到元素位置
+                        driver.execute_script("arguments[0].scrollIntoView(true);", earn)
+                        time.sleep(1)
+                        # 使用JavaScript点击
+                        logger.info("点击赚取积分")
+                        driver.execute_script("arguments[0].click();", earn)
+                        
+                        # 处理可能出现的验证码
+                        try:
+                            logger.info("检查是否需要验证码")
+                            wait.until(EC.frame_to_be_available_and_switch_to_it((By.ID, "tcaptcha_iframe_dy")))
+                            logger.info("处理验证码")
+                            process_captcha()
+                            driver.switch_to.default_content()
+                        except:
+                            logger.info("未触发验证码或验证码框架加载失败")
+                            driver.switch_to.default_content()
+                        
+                        logger.info("赚取积分操作完成")
+                        break
+                    else:
+                        logger.warning("未找到赚取积分按钮，刷新页面重试...")
+                        driver.refresh()
+                        time.sleep(3)
+                except Exception as e:
+                    logger.error(f"访问赚取积分页面时出错: {e}")
+                    time.sleep(3)
+            else:
+                logger.error("多次尝试后仍无法找到赚取积分按钮")
+            driver.implicitly_wait(5)
+            points_raw = driver.find_element(By.XPATH,
+                                             '//*[@id="app"]/div[1]/div[3]/div[2]/div/div/div[2]/div[1]/div[1]/div/p/div/h3').get_attribute(
+                "textContent")
+            current_points = int(''.join(re.findall(r'\d+', points_raw)))
+            logger.info(f"当前剩余积分: {current_points} | 约为 {current_points / 2000:.2f} 元")
+            logger.info("任务执行成功！")
+        else:
+            logger.error("登录失败！")
+    except Exception as e:
+        logger.error(f"执行过程中发生错误: {str(e)}")
+        raise
+    finally:
+        # 确保关闭浏览器
+        if driver:
+            try:
+                driver.quit()
+                logger.info("已关闭浏览器")
+            except:
+                pass
+        
+        # 打印总执行时间
+        end_time = time.time()
+        logger.info(f"任务总执行时间: {(end_time - start_time):.2f} 秒")
+
+# 主程序入口
+if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     logger = logging.getLogger(__name__)
     ver = "2.2"
@@ -479,174 +786,12 @@ if __name__ == "__main__":
     logger.info("Github发布页: https://github.com/scfcn/Rainyun-Qiandao")
     logger.info("------------------------------------------------------------------")
     
-    if not debug:
-        delay_sec = random.randint(5, 10)
-        logger.info(f"随机延时等待 {delay_sec} 秒")
-        time.sleep(delay_sec)
-    logger.info("初始化 ddddocr")
-    ocr = ddddocr.DdddOcr(ocr=True, show_ad=False)
-    det = ddddocr.DdddOcr(det=True, show_ad=False)
-    logger.info("初始化 Selenium")
-    # 在 main 函数中添加
-    headless = os.environ.get('HEADLESS', 'false').lower() == 'true'
-    debug = os.environ.get('DEBUG', 'false').lower() == 'true'
+    # 从环境变量获取debug模式
+    debug_mode = os.environ.get('DEBUG', 'false').lower() == 'true'
     
-    # 传递 headless 参数给 init_selenium
-    driver = init_selenium(debug=debug, headless=headless)
-    # 过 Selenium 检测
-    with open("stealth.min.js", mode="r") as f:
-        js = f.read()
-    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-        "source": js
-    })
-    logger.info("发起登录请求")
-    # 添加连接重试机制
-    max_connection_retries = 3
-    connection_retry_count = 0
-    
-    while connection_retry_count < max_connection_retries:
-        try:
-            logger.info(f"尝试连接雨云登录页面 (第{connection_retry_count + 1}/{max_connection_retries}次)")
-            # 设置页面加载超时
-            driver.set_page_load_timeout(30)
-            driver.get("https://app.rainyun.com/auth/login")
-            # 简单检查页面是否加载成功
-            current_url = driver.current_url
-            logger.info(f"连接成功，当前URL: {current_url}")
-            break
-        except Exception as e:
-            connection_retry_count += 1
-            logger.error(f"连接失败: {str(e)}")
-            if connection_retry_count < max_connection_retries:
-                wait_time = (connection_retry_count * 2) + random.randint(1, 3)
-                logger.info(f"{wait_time}秒后重试...")
-                time.sleep(wait_time)
-            else:
-                logger.error("达到最大重试次数，连接失败！")
-                raise
-    
-    wait = WebDriverWait(driver, timeout)
-    # 改进的登录逻辑，添加重试机制
-    max_retries = 3
-    retry_count = 0
-    login_success = False
-    
-    while retry_count < max_retries and not login_success:
-        try:
-            # 使用更可靠的定位方式
-            username = wait.until(EC.visibility_of_element_located((By.NAME, 'login-field')))
-            password = wait.until(EC.visibility_of_element_located((By.NAME, 'login-password')))
-            
-            # 尝试多种方式定位登录按钮
-            try:
-                login_button = wait.until(EC.element_to_be_clickable((By.XPATH,
-                                                                    '//*[@id="app"]/div[1]/div[1]/div/div[2]/fade/div/div/span/form/button')))
-            except:
-                try:
-                    login_button = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'button[type="submit"]')))
-                except:
-                    login_button = wait.until(EC.element_to_be_clickable((By.XPATH, '//button[contains(text(), "登录")]')))
-            
-            # 清除可能存在的输入
-            username.clear()
-            password.clear()
-            
-            # 添加输入延迟，模拟真实用户
-            username.send_keys(user)
-            time.sleep(0.5)
-            password.send_keys(pwd)
-            time.sleep(0.5)
-            
-            # 使用JavaScript点击，避免元素遮挡问题
-            driver.execute_script("arguments[0].click();", login_button)
-            logger.info(f"登录尝试 {retry_count + 1}/{max_retries}")
-            login_success = True
-        except TimeoutException:
-            retry_count += 1
-            if retry_count < max_retries:
-                logger.warning(f"登录失败，{retry_count}秒后重试...")
-                time.sleep(retry_count)
-                driver.refresh()
-            else:
-                logger.error("页面加载超时，请尝试延长超时时间或切换到国内网络环境！")
-                exit()
+    # 执行主函数
     try:
-        login_captcha = wait.until(EC.visibility_of_element_located((By.ID, 'tcaptcha_iframe_dy')))
-        logger.warning("触发验证码！")
-        driver.switch_to.frame("tcaptcha_iframe_dy")
-        process_captcha()
-    except TimeoutException:
-        logger.info("未触发验证码")
-    time.sleep(5)
-    driver.switch_to.default_content()
-    # 验证登录状态并处理赚取积分
-    if "dashboard" in driver.current_url:
-        logger.info("登录成功！")
-        logger.info("正在转到赚取积分页")
-        
-        # 尝试多次访问赚取积分页面
-        for _ in range(3):
-            try:
-                driver.get("https://app.rainyun.com/account/reward/earn")
-                logger.info("等待赚取积分页面加载...")
-                # 等待页面加载完成
-                wait.until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
-                time.sleep(3)  # 额外等待确保页面完全渲染
-                
-                # 使用多种策略查找赚取积分按钮
-                earn = None
-                strategies = [
-                    (By.XPATH, '//*[@id="app"]/div[1]/div[3]/div[2]/div/div/div[2]/div[2]/div/div/div/div[1]/div/div[1]/div/div[1]/div/span[2]/a'),
-                    (By.XPATH, '//a[contains(@href, "earn") and contains(text(), "赚取")]'),
-                    (By.CSS_SELECTOR, 'a[href*="earn"]'),
-                    (By.XPATH, '//a[contains(@class, "earn")]')
-                ]
-                
-                for by, selector in strategies:
-                    try:
-                        earn = wait.until(EC.element_to_be_clickable((by, selector)))
-                        logger.info(f"使用策略 {by}={selector} 找到赚取积分按钮")
-                        break
-                    except:
-                        logger.debug(f"策略 {by}={selector} 未找到按钮，尝试下一种")
-                        continue
-                
-                if earn:
-                    # 滚动到元素位置
-                    driver.execute_script("arguments[0].scrollIntoView(true);", earn)
-                    time.sleep(1)
-                    # 使用JavaScript点击
-                    logger.info("点击赚取积分")
-                    driver.execute_script("arguments[0].click();", earn)
-                    
-                    # 处理可能出现的验证码
-                    try:
-                        logger.info("检查是否需要验证码")
-                        wait.until(EC.frame_to_be_available_and_switch_to_it((By.ID, "tcaptcha_iframe_dy")))
-                        logger.info("处理验证码")
-                        process_captcha()
-                        driver.switch_to.default_content()
-                    except:
-                        logger.info("未触发验证码或验证码框架加载失败")
-                        driver.switch_to.default_content()
-                    
-                    logger.info("赚取积分操作完成")
-                    break
-                else:
-                    logger.warning("未找到赚取积分按钮，刷新页面重试...")
-                    driver.refresh()
-                    time.sleep(3)
-            except Exception as e:
-                logger.error(f"访问赚取积分页面时出错: {e}")
-                time.sleep(3)
-        else:
-            logger.error("多次尝试后仍无法找到赚取积分按钮")
-        driver.implicitly_wait(5)
-        points_raw = driver.find_element(By.XPATH,
-                                         '//*[@id="app"]/div[1]/div[3]/div[2]/div/div/div[2]/div[1]/div[1]/div/p/div/h3').get_attribute(
-            "textContent")
-        current_points = int(''.join(re.findall(r'\d+', points_raw)))
-        logger.info(f"当前剩余积分: {current_points} | 约为 {current_points / 2000:.2f} 元")
-        logger.info("任务执行成功！")
-    else:
-        logger.error("登录失败！")
+        main(debug=debug_mode)
+    except Exception as e:
+        logger.critical(f"程序异常退出: {str(e)}")
+        sys.exit(1)
