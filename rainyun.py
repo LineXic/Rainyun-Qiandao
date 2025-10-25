@@ -55,8 +55,58 @@ def init_selenium(debug=False, headless=False):
     # 添加通用选项
     ops.add_argument('--window-size=1920,1080')
     ops.add_argument('--disable-blink-features=AutomationControlled')
-    ops.add_argument('--no-proxy-server')
     ops.add_argument('--lang=zh-CN')
+    
+    # 增强网络稳定性选项
+    ops.add_argument('--disable-features=site-per-process')
+    ops.add_argument('--disable-extensions')
+    ops.add_argument('--disable-infobars')
+    ops.add_argument('--ignore-certificate-errors')
+    ops.add_argument('--allow-insecure-localhost')
+    ops.add_argument('--log-level=3')
+    
+    # 获取国内代理IP
+    proxy_url = None
+    try:
+        # 优先从环境变量获取代理设置
+        proxy_url = os.environ.get('HTTP_PROXY') or os.environ.get('HTTPS_PROXY')
+        
+        # 如果没有环境变量代理设置，且在GitHub Actions环境中，尝试从API获取代理
+        if not proxy_url and os.environ.get("GITHUB_ACTIONS", "false") == "true":
+            logger.info("尝试从API获取国内代理IP")
+            response = requests.get("https://proxy.scdn.io/api/get_proxy.php?protocol=https", timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('code') == 200 and data.get('data', {}).get('proxies'):
+                    proxy_ip = data['data']['proxies'][0]
+                    proxy_url = f"https://{proxy_ip}"
+                    logger.info(f"成功获取代理IP: {proxy_ip}")
+                else:
+                    logger.warning(f"代理API返回异常: {data}")
+            else:
+                logger.warning(f"代理API请求失败: {response.status_code}")
+        
+        # 配置代理
+        if proxy_url:
+            logger.info(f"使用代理: {proxy_url}")
+            # 添加代理选项
+            ops.add_argument(f'--proxy-server={proxy_url}')
+            # 信任所有SSL证书，避免代理SSL问题
+            ops.add_argument('--ignore-certificate-errors-spki-list=*')
+        else:
+            logger.info("未配置代理，使用直接连接")
+            ops.add_argument('--no-proxy-server')
+    except Exception as e:
+        logger.error(f"代理配置出错: {e}")
+        ops.add_argument('--no-proxy-server')
+    
+    # 添加网络超时设置
+    ops.set_capability('timeouts', {'pageLoad': 60000, 'script': 60000, 'implicit': 30000})
+    
+    # 禁用不必要的安全策略以提高连接成功率
+    if os.environ.get("GITHUB_ACTIONS", "false") == "true":
+        ops.add_argument('--disable-web-security')
+        ops.add_argument('--allow-running-insecure-content')
     
     # 环境变量判断是否在GitHub Actions中运行
     is_github_actions = os.environ.get("GITHUB_ACTIONS", "false") == "true"
@@ -463,7 +513,31 @@ if __name__ == "__main__":
         "source": js
     })
     logger.info("发起登录请求")
-    driver.get("https://app.rainyun.com/auth/login")
+    # 添加连接重试机制
+    max_connection_retries = 3
+    connection_retry_count = 0
+    
+    while connection_retry_count < max_connection_retries:
+        try:
+            logger.info(f"尝试连接雨云登录页面 (第{connection_retry_count + 1}/{max_connection_retries}次)")
+            # 设置页面加载超时
+            driver.set_page_load_timeout(30)
+            driver.get("https://app.rainyun.com/auth/login")
+            # 简单检查页面是否加载成功
+            current_url = driver.current_url
+            logger.info(f"连接成功，当前URL: {current_url}")
+            break
+        except Exception as e:
+            connection_retry_count += 1
+            logger.error(f"连接失败: {str(e)}")
+            if connection_retry_count < max_connection_retries:
+                wait_time = (connection_retry_count * 2) + random.randint(1, 3)
+                logger.info(f"{wait_time}秒后重试...")
+                time.sleep(wait_time)
+            else:
+                logger.error("达到最大重试次数，连接失败！")
+                raise
+    
     wait = WebDriverWait(driver, timeout)
     # 改进的登录逻辑，添加重试机制
     max_retries = 3

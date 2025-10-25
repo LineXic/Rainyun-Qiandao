@@ -55,6 +55,10 @@ jobs:
           DEBUG: "false"
           # 确保使用系统路径中的ChromeDriver
           CHROMEDRIVER_PATH: "chromedriver"
+          # 可选：配置国内代理以解决海外访问限制
+          # 如果未配置，脚本会自动尝试从API获取国内代理IP
+          HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
+          HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
       
       - name: 清理临时文件
         run: rm -rf temp
